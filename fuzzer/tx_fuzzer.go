@@ -58,6 +58,7 @@ type TxFuzzer struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	rng      *rand.Rand
+	nonces   *NonceManager
 
 	// Mutation components
 	mutationConfig *mutation.MutationConfig
@@ -154,6 +155,10 @@ func NewCircuitBreaker(maxFailures int, resetTimeout time.Duration) *CircuitBrea
 
 // Call executes a function with circuit breaker protection
 func (cb *CircuitBreaker) Call(fn func() error) error {
+	return cb.CallClassified(fn)
+}
+
+func (cb *CircuitBreaker) CallClassified(fn func() error) error {
 	cb.mutex.Lock()
 	defer cb.mutex.Unlock()
 
@@ -165,19 +170,22 @@ func (cb *CircuitBreaker) Call(fn func() error) error {
 
 	// If circuit is open, return error immediately
 	if cb.state == "open" {
-		return fmt.Errorf("circuit breaker is open")
+		return ErrCircuitBreakerOpen
 	}
 
 	// Execute function
 	err := fn()
 
 	if err != nil {
-		cb.failures++
-		cb.lastFailTime = time.Now()
+		class := ClassifySendError(err)
+		if class.AffectsCircuitBreaker() {
+			cb.failures++
+			cb.lastFailTime = time.Now()
 
-		// Open circuit if max failures reached
-		if cb.failures >= cb.maxFailures {
-			cb.state = "open"
+			// Open circuit if max failures reached
+			if cb.failures >= cb.maxFailures {
+				cb.state = "open"
+			}
 		}
 		return err
 	}
@@ -271,6 +279,7 @@ func NewTxFuzzer(cfg *TxFuzzConfig, accounts []config.Account, logger utils.Logg
 		ctx:           ctx,
 		cancel:        cancel,
 		rng:           rng,
+		nonces:        NewNonceManager(),
 		txRecords:     make(map[common.Hash]*TransactionRecord),
 		stats:         stats,
 		clients:       make(map[string]*ethclient.Client),
@@ -801,14 +810,37 @@ func (tf *TxFuzzer) sendTransactionWithRetry(endpoint string, tx *types.Transact
 		BackoffFactor: 2.0,
 	}
 
-	// Execute with circuit breaker and retry
+	// Execute with circuit breaker and retry. Only network/RPC errors affect
+	// the endpoint breaker; business errors such as nonce/replacement issues
+	// are returned immediately for caller-level handling.
 	return cb.Call(func() error {
-		return RetryWithBackoff(retryConfig, func() error {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
+		var lastErr error
+		delay := retryConfig.InitialDelay
 
-			return client.SendTransaction(ctx, tx)
-		})
+		for attempt := 0; attempt <= retryConfig.MaxRetries; attempt++ {
+			if attempt > 0 {
+				time.Sleep(delay)
+				delay = time.Duration(float64(delay) * retryConfig.BackoffFactor)
+				if delay > retryConfig.MaxDelay {
+					delay = retryConfig.MaxDelay
+				}
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			err := client.SendTransaction(ctx, tx)
+			cancel()
+
+			if err == nil {
+				return nil
+			}
+
+			lastErr = err
+			if !ClassifySendError(err).ShouldRetrySend() {
+				return err
+			}
+		}
+
+		return fmt.Errorf("max retries exceeded: %w", lastErr)
 	})
 }
 
@@ -911,7 +943,7 @@ func (tf *TxFuzzer) sendRandomTransaction(cfg *TxFuzzConfig) error {
 
 	// Get nonce with retry
 	address := crypto.PubkeyToAddress(privateKey.PublicKey)
-	nonce, err := tf.getNonceWithRetry(client, address, 3)
+	nonce, err := tf.nonces.Next(tf.ctx, client, address)
 	if err != nil {
 		return fmt.Errorf("failed to get nonce: %w", err)
 	}
@@ -931,6 +963,17 @@ func (tf *TxFuzzer) sendRandomTransaction(cfg *TxFuzzConfig) error {
 	tf.updateTransactionMetrics(endpoint, err, latency)
 
 	if err != nil {
+		class := ClassifySendError(err)
+		action := class.Action()
+		if class == SendErrorNonce {
+			if refreshed, refreshErr := tf.nonces.Refresh(tf.ctx, client, address); refreshErr != nil {
+				tf.logger.Warn("error_class=%s action=%s refresh_error=%v address=%s", class, action, refreshErr, address.Hex())
+			} else {
+				tf.logger.Warn("error_class=%s action=%s next_nonce=%d address=%s", class, action, refreshed, address.Hex())
+			}
+		} else {
+			tf.logger.Warn("error_class=%s action=%s endpoint=%s", class, action, endpoint)
+		}
 		tf.updateStats("failed", mutationUsed)
 		tf.logger.Debug("Failed to send transaction: %v", err)
 		return err
