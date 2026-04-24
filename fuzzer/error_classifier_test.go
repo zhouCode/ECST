@@ -55,6 +55,11 @@ func TestClassifySendError(t *testing.T) {
 			want: SendErrorNetwork,
 		},
 		{
+			name: "txpool full",
+			err:  errors.New("txpool is full"),
+			want: SendErrorTxPoolFull,
+		},
+		{
 			name: "circuit breaker",
 			err:  ErrCircuitBreakerOpen,
 			want: SendErrorCircuitBreakerOpen,
@@ -86,6 +91,7 @@ func TestSendErrorClassCircuitBreakerPolicy(t *testing.T) {
 	assert.False(t, SendErrorKnownTransaction.AffectsCircuitBreaker())
 	assert.False(t, SendErrorFunds.AffectsCircuitBreaker())
 	assert.False(t, SendErrorGas.AffectsCircuitBreaker())
+	assert.False(t, SendErrorTxPoolFull.AffectsCircuitBreaker())
 	assert.False(t, SendErrorCircuitBreakerOpen.AffectsCircuitBreaker())
 	assert.False(t, SendErrorUnknown.AffectsCircuitBreaker())
 }
@@ -95,6 +101,7 @@ func TestSendErrorClassActions(t *testing.T) {
 	assert.Equal(t, "skip_nonce", SendErrorReplacementUnderpriced.Action())
 	assert.Equal(t, "record_gas_error", SendErrorGas.Action())
 	assert.Equal(t, "count_endpoint_failure", SendErrorNetwork.Action())
+	assert.Equal(t, "record_txpool_full", SendErrorTxPoolFull.Action())
 	assert.Equal(t, "skip_endpoint", SendErrorCircuitBreakerOpen.Action())
 }
 

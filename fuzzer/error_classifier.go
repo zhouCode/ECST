@@ -16,6 +16,7 @@ const (
 	SendErrorKnownTransaction       SendErrorClass = "known_transaction"
 	SendErrorFunds                  SendErrorClass = "funds"
 	SendErrorGas                    SendErrorClass = "gas"
+	SendErrorTxPoolFull             SendErrorClass = "txpool_full"
 	SendErrorNetwork                SendErrorClass = "network"
 	SendErrorCircuitBreakerOpen     SendErrorClass = "circuit_breaker"
 	SendErrorUnknown                SendErrorClass = "unknown"
@@ -47,6 +48,9 @@ func ClassifySendError(err error) SendErrorClass {
 		return SendErrorKnownTransaction
 	case strings.Contains(msg, "insufficient funds"):
 		return SendErrorFunds
+	case strings.Contains(msg, "txpool is full") ||
+		strings.Contains(msg, "transaction pool is full"):
+		return SendErrorTxPoolFull
 	case strings.Contains(msg, "intrinsic gas too low") ||
 		strings.Contains(msg, "insufficient gas for floor data gas cost") ||
 		strings.Contains(msg, "gas limit reached") ||
@@ -91,6 +95,8 @@ func (c SendErrorClass) Action() string {
 		return "record_funds_error"
 	case SendErrorGas:
 		return "record_gas_error"
+	case SendErrorTxPoolFull:
+		return "record_txpool_full"
 	case SendErrorUnknown:
 		return "record_unknown"
 	default:
