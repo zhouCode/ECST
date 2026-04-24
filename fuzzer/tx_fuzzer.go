@@ -67,13 +67,15 @@ type TxFuzzer struct {
 	rlpMutator     *strategies.RLPMutator
 
 	// Transaction tracking
-	txRecords       map[common.Hash]*TransactionRecord
-	recordsMutex    sync.RWMutex
-	stats           *TxStats
-	statsMutex      sync.RWMutex // Protect stats updates
-	successTxHashes []string     // 成功发送的交易哈希值列表
-	failedTxHashes  []string     // 发送失败的交易哈希值列表
-	hashMutex       sync.RWMutex // 保护哈希值列表的互斥锁
+	txRecords             map[common.Hash]*TransactionRecord
+	recordsMutex          sync.RWMutex
+	stats                 *TxStats
+	statsMutex            sync.RWMutex // Protect stats updates
+	errorClassCounts      map[SendErrorClass]int64
+	errorClassCountsMutex sync.RWMutex
+	successTxHashes       []string     // 成功发送的交易哈希值列表
+	failedTxHashes        []string     // 发送失败的交易哈希值列表
+	hashMutex             sync.RWMutex // 保护哈希值列表的互斥锁
 
 	// Multi-node support
 	clients         map[string]*ethclient.Client // Multiple RPC clients
@@ -274,18 +276,19 @@ func NewTxFuzzer(cfg *TxFuzzConfig, accounts []config.Account, logger utils.Logg
 
 	// Create base fuzzer
 	tf := &TxFuzzer{
-		accounts:      accounts,
-		logger:        logger,
-		ctx:           ctx,
-		cancel:        cancel,
-		rng:           rng,
-		nonces:        NewNonceManager(),
-		txRecords:     make(map[common.Hash]*TransactionRecord),
-		stats:         stats,
-		clients:       make(map[string]*ethclient.Client),
-		nodeHealth:    make(map[string]bool),
-		currentTPS:    cfg.TxPerSecond,
-		systemMetrics: &SystemMetrics{NetworkIO: make(map[string]int64), NodeLatency: make(map[string]time.Duration), ErrorRates: make(map[string]float64)},
+		accounts:         accounts,
+		logger:           logger,
+		ctx:              ctx,
+		cancel:           cancel,
+		rng:              rng,
+		nonces:           NewNonceManager(),
+		txRecords:        make(map[common.Hash]*TransactionRecord),
+		stats:            stats,
+		errorClassCounts: make(map[SendErrorClass]int64),
+		clients:          make(map[string]*ethclient.Client),
+		nodeHealth:       make(map[string]bool),
+		currentTPS:       cfg.TxPerSecond,
+		systemMetrics:    &SystemMetrics{NetworkIO: make(map[string]int64), NodeLatency: make(map[string]time.Duration), ErrorRates: make(map[string]float64)},
 	}
 
 	// Setup RPC connections (multi-node or single-node)
@@ -418,6 +421,7 @@ func (tf *TxFuzzer) Start(cfg *TxFuzzConfig) error {
 			}
 
 			if err := tf.sendRandomTransaction(cfg); err != nil {
+				tf.recordErrorClass(ClassifySendError(err))
 				tf.logger.Error("Failed to send transaction: %v", err)
 			} else {
 				txCount++

@@ -67,15 +67,7 @@ func main() {
 				logger.Error("Failed to create fuzz client: %v", err)
 			} else {
 				txCfg := cfg.GetTxFuzzingConfig()
-				fuzzConfig := &fuzzer.TxFuzzConfig{
-					RPCEndpoint:  txCfg.RPCEndpoint,
-					ChainID:      txCfg.ChainID,
-					MaxGasPrice:  big.NewInt(txCfg.MaxGasPrice),
-					MaxGasLimit:  txCfg.MaxGasLimit,
-					TxPerSecond:  txCfg.TxPerSecond,
-					FuzzDuration: time.Duration(txCfg.FuzzDurationSec) * time.Second,
-					Seed:         txCfg.Seed,
-				}
+				fuzzConfig := buildTxFuzzConfig(txCfg)
 
 				err = fuzzClient.StartTxFuzzing(fuzzConfig, accounts)
 				if err != nil {
@@ -93,7 +85,14 @@ func main() {
 						logger.Info("Transaction fuzzing duration completed")
 					}
 
-					fuzzClient.StopTxFuzzing()
+					if summary := fuzzClient.StopTxFuzzing(); summary != nil {
+						summaryPath := txFuzzSummaryPath(cfg.GetOutputPath(), summary.FinishedAt)
+						if err := fuzzer.WriteRunSummaryJSON(summaryPath, *summary); err != nil {
+							logger.Error("Failed to write transaction fuzzing summary: %v", err)
+						} else {
+							logger.Info("Transaction fuzzing summary written: %s", summaryPath)
+						}
+					}
 					logger.Info("Transaction fuzzing stopped")
 				}
 			}
@@ -124,6 +123,55 @@ func main() {
 		logger.Fatal("Failed to create report directory '%s': %v", reportPath, err)
 	}
 	logger.Info("Report directory created/verified: %s", reportPath)
+}
+
+func buildTxFuzzConfig(txCfg config.TxFuzzingConfig) *fuzzer.TxFuzzConfig {
+	rpcEndpoints := txCfg.RPCEndpoints
+	if len(rpcEndpoints) == 0 && txCfg.RPCEndpoint != "" {
+		rpcEndpoints = []string{txCfg.RPCEndpoint}
+	}
+
+	rpcEndpoint := txCfg.RPCEndpoint
+	if len(rpcEndpoints) > 0 {
+		rpcEndpoint = rpcEndpoints[0]
+	}
+
+	fuzzConfig := &fuzzer.TxFuzzConfig{
+		RPCEndpoint:  rpcEndpoint,
+		ChainID:      txCfg.ChainID,
+		MaxGasPrice:  big.NewInt(txCfg.MaxGasPrice),
+		MaxGasLimit:  txCfg.MaxGasLimit,
+		TxPerSecond:  txCfg.TxPerSecond,
+		FuzzDuration: time.Duration(txCfg.FuzzDurationSec) * time.Second,
+		Seed:         txCfg.Seed,
+	}
+
+	if len(rpcEndpoints) > 1 {
+		fuzzConfig.MultiNode = buildMultiNodeConfig(rpcEndpoints)
+	}
+
+	return fuzzConfig
+}
+
+func buildMultiNodeConfig(rpcEndpoints []string) *fuzzer.MultiNodeConfig {
+	loadDistribution := make(map[string]float64, len(rpcEndpoints))
+	weight := 1.0 / float64(len(rpcEndpoints))
+	for _, endpoint := range rpcEndpoints {
+		loadDistribution[endpoint] = weight
+	}
+
+	return &fuzzer.MultiNodeConfig{
+		RPCEndpoints:        append([]string(nil), rpcEndpoints...),
+		LoadDistribution:    loadDistribution,
+		FailoverEnabled:     true,
+		HealthCheckInterval: 30 * time.Second,
+		MaxRetries:          3,
+		RetryDelay:          time.Second,
+	}
+}
+
+func txFuzzSummaryPath(outputPath string, finishedAt time.Time) string {
+	return filepath.Join(outputPath, fmt.Sprintf("tx_fuzz_summary_%s.json", finishedAt.Format("20060102_150405")))
 }
 
 func resolveConfigPath(path string) (string, error) {
